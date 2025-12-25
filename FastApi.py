@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 load_dotenv()
 app = FastAPI()
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "https://mhew-dashboard.vercel.app"], allow_methods=["*"], allow_headers=["*"])
 client = MongoClient(os.getenv("MONGO_URI"))
 db = client["emergency_db"]
 
