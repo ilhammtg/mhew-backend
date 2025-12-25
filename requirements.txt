@@ -1,7 +1,9 @@
 python-telegram-bot[job-queue]
 requests
 pymongo
-python-dotenv
 fastapi
 uvicorn
 httpx
+pymongo[srv]
+dnspython
+python-dotenv
