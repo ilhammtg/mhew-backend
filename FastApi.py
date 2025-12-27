@@ -94,6 +94,7 @@ async def get_precip_status():
                 }
             ]
             agg = list(db.weather_logs.aggregate(pipeline))
+            # Ensure total is NOT divided by 3.0 as per new logic
             total = float(agg[0]["total_precip"]) if agg else 0.0
             
             status = "SAFE"
