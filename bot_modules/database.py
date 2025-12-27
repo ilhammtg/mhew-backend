@@ -33,10 +33,18 @@ else:
     col_settings = None
 
 # Indexes
-col_locations.create_index([("chat_id", ASCENDING), ("name_norm", ASCENDING)], unique=True)
-col_weather_logs.create_index([("chat_id", ASCENDING), ("location_id", ASCENDING), ("timestamp", ASCENDING)])
-col_alerts.create_index([("DateTime", ASCENDING)])
-col_weather_alerts.create_index([("saved_at", ASCENDING)])
+# Indexes
+try:
+    if col_locations is not None:
+        col_locations.create_index([("chat_id", ASCENDING), ("name_norm", ASCENDING)], unique=True)
+    if col_weather_logs is not None:
+        col_weather_logs.create_index([("chat_id", ASCENDING), ("location_id", ASCENDING), ("timestamp", ASCENDING)])
+    if col_alerts is not None:
+        col_alerts.create_index([("DateTime", ASCENDING)])
+    if col_weather_alerts is not None:
+        col_weather_alerts.create_index([("saved_at", ASCENDING)])
+except Exception as e:
+    print(f"⚠️ Index Creation Warning: {e}")
 
 def get_setting(chat_id: int, key: str, default=None):
     doc = col_settings.find_one({"_id": f"{chat_id}:{key}"})
