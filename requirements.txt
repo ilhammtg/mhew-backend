@@ -7,3 +7,4 @@ httpx
 pymongo[srv]
 dnspython
 python-dotenv
+pydantic
