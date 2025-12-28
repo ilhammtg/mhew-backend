@@ -31,6 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_setting(chat_id, "weather_mode", None) is None:
         set_setting(chat_id, "weather_mode", DEFAULT_WEATHER_MODE)
 
+    text = (
         "👋 *MHEWS - Multi-Hazard Early Warning System*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "Bot ini memantau:\n"
