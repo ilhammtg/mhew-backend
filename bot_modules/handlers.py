@@ -1,6 +1,7 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
+from datetime import datetime, timezone
 
 from .config import DEFAULT_WEATHER_MODE, WINDY_API_KEY
 from .database import (

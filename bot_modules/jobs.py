@@ -203,6 +203,9 @@ async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
         api_key = os.getenv("API_KEY", "RAHASIA_KUNCI_API_ANDA")
         api_url = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
+        now_utc = datetime.now(timezone.utc)
+
+        for loc in locs:
             try:
                 # 2. Resolve ADM4 Code (Dynamic from CSV / DB)
                 adm4_code = loc.get("adm4")
