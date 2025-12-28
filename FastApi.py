@@ -143,4 +143,23 @@ async def get_point_forecast(location_id: Optional[str] = None):
     except Exception as e:
         return {"error": str(e)}
 
-# ... (Previous endpoints like /gempa/terkini etc stay if not replaced)
+@app.get("/api/v1/gempa/terkini")
+async def get_gempa():
+    if db is None: return {"error": "Database not connected"}
+    return db.alerts.find_one(sort=[("DateTime", -1)], projection={"_id": 0})
+
+@app.get("/api/v1/gempa/aceh")
+async def get_history():
+    if db is None: return []
+    return list(db.alerts.find({"is_aceh": True}, {"_id": 0}).sort("DateTime", -1).limit(10))
+
+@app.get("/api/v1/cuaca/aceh")
+async def get_cuaca():
+    if db is None: return []
+    return list(db.weather_alerts.find({}, {"_id": 0}).sort("date", -1).limit(5))
+
+@app.get("/api/v1/iot/trigger")
+async def iot():
+    if db is None: return {"trigger": False}
+    latest = db.alerts.find_one(sort=[("DateTime", -1)])
+    return {"trigger": latest.get("alert_level") == "DANGER" if latest else False}

@@ -1,5 +1,7 @@
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+import os
+import httpx
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, Application
 
