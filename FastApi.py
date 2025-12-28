@@ -45,6 +45,13 @@ class ForecastItem(BaseModel):
     humidity: int
     wind_speed: float
     precip: float
+    precip_mm: Optional[float] = None
+    humidity: Optional[int] = None
+    wind_speed: Optional[float] = None
+
+class AutoDetectRequest(BaseModel):
+    lat: float
+    lon: float
 
 class WeatherLogData(BaseModel):
     temp: float
@@ -166,3 +173,50 @@ async def iot_trigger():
         if "tsunami" in latest["Potensi"].lower():
             trigger = True
     return {"trigger": trigger}
+
+@app.post("/api/v1/auto-detect", dependencies=[Depends(verify_api_key)])
+async def auto_detect_location(req: AutoDetectRequest):
+    """
+    1. Reverse Geocode (Lat/Lon -> Village Name)
+    2. DB Lookup (Village Name -> ADM4 Code)
+    3. Return details
+    """
+    from bot_modules.services import reverse_geocode
+    from bot_modules.utils import normalize_name
+    
+    try:
+        # 1. Reverse Geocode
+        geo = await reverse_geocode(req.lat, req.lon)
+        if not geo:
+            # Fallback invalid
+            raise HTTPException(status_code=404, detail="Location address not found")
+        
+        village_clean = normalize_name(geo["village"]).replace("KELURAHAN ", "").replace("DESA ", "").strip()
+        
+        # 2. DB Lookup in wilayah_bmkg
+        # Try finding exact name first in wilayah_bmkg
+        wilayah = db.wilayah_bmkg.find_one({"name": village_clean})
+        
+        # Fallback text search if needed
+        if not wilayah:
+             # Try regex for partial match
+             wilayah = db.wilayah_bmkg.find_one({"name": {"$regex": f"^{village_clean}", "$options": "i"}})
+        
+        if not wilayah:
+             return {
+                "found": False,
+                "geo_name": geo["village"],
+                "fallback_message": "Wilayah tidak ada di database BMKG"
+            }
+
+        return {
+            "found": True,
+            "adm4": wilayah["_id"],
+            "name": wilayah["name"],
+            "level": wilayah["level"],
+            "geo_detail": geo
+        }
+
+    except Exception as e:
+        print(f"Auto-Detect Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

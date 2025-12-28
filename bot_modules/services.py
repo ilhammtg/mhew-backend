@@ -45,6 +45,42 @@ async def geocode_location(query: str):
         print(f"Geocoding error: {e}")
         return None
 
+async def reverse_geocode(lat: float, lon: float):
+    """
+    Mengubah lat, lon menjadi detail alamat (Desa, Kecamatan, Kota)
+    Menggunakan OSM Nominatim.
+    """
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {
+        "lat": lat, 
+        "lon": lon, 
+        "format": "json", 
+        "zoom": 14 # Level Desa
+    }
+    headers = {"User-Agent": "MHEWS-Bot/3.0 (weather-system)"}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=headers) as c:
+            r = await c.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+            addr = data.get("address", {})
+            
+            # Prioritize Village (Desa/Kelurahan)
+            village = addr.get("village") or addr.get("suburb") or addr.get("neighbourhood")
+            district = addr.get("subdistrict") or addr.get("county")
+            city = addr.get("city") or addr.get("town") or addr.get("regency")
+            
+            return {
+                "village": village,
+                "district": district,
+                "city": city,
+                "full_address": data.get("display_name")
+            }
+    except Exception as e:
+        print(f"Reverse Geo Error: {e}")
+        return None
+
 async def windy_point_forecast(lat: float, lon: float, model: str = "gfs", parameters=None, levels=None):
     if not WINDY_API_KEY:
         raise RuntimeError("WINDY_API_KEY tidak tersedia di .env")

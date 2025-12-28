@@ -320,6 +320,18 @@ async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
                     },
                     "forecast_3h": final_forecast
                 }
+                
+                # --- AUTO ALERT: Curah Hujan > 50mm ---
+                if precip_mm > 50:
+                     msg_alert = (
+                        f"🌧 *PERINGATAN CUACA EKSTRIM*\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📍 *{loc['name']}*\n"
+                        f"⚠️ Terdeteksi curah hujan tinggi: *{precip_mm} mm*\n"
+                        f"Waspada potensi banjir!"
+                     )
+                     await context.bot.send_message(chat_id=chat_id, text=msg_alert, parse_mode=ParseMode.MARKDOWN)
+                # --------------------------------------
 
                 # 8. Send to API
                 headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
