@@ -9,10 +9,12 @@ from .database import (
     get_setting, set_setting
 )
 from .services import (
-    get_bmkg_eq, geocode_location, windy_point_forecast
+    get_bmkg_eq, geocode_location, windy_point_forecast,
+    fetch_bmkg_point_forecast_json
 )
 from .utils import (
-    get_alert_level, normalize_name, format_ts_ms, parse_windy_latest
+    get_alert_level, normalize_name, format_ts_ms, parse_windy_latest,
+    get_adm4_from_csv, get_bmkg_weather_text
 )
 from .keyboards import (
     main_menu_keyboard, location_menu_keyboard, 
@@ -29,20 +31,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_setting(chat_id, "weather_mode", None) is None:
         set_setting(chat_id, "weather_mode", DEFAULT_WEATHER_MODE)
 
-    text = (
         "👋 *MHEWS - Multi-Hazard Early Warning System*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "Bot ini memantau:\n"
         "🌍 Gempa (BMKG AutoGempa)\n"
-        "⛈ Peringatan Cuaca (BMKG Nowcast RSS)\n"
-        "🌬 Prakiraan/Log Cuaca (Windy Point Forecast)\n\n"
+        "⛈ Peringatan Cuaca (BMKG RSS & Point Forecast)\n\n"
         "*Cara pakai cepat:*\n"
         "1) Masuk *Kelola Lokasi* → *Tambah Lokasi* (cukup ketik nama kota/daerah)\n"
-        "2) Masuk *Cek Cuaca* untuk melihat prakiraan per lokasi\n"
-        "3) *Pengaturan* untuk pilih Mode: BMKG / Windy / Both\n\n"
+        "2) Masuk *Cek Cuaca* untuk melihat prakiraan BMKG per lokasi\n"
+        "3) *Pengaturan* untuk notifikasi lanjutan\n\n"
         "*Catatan:*\n"
-        "• Anda tidak perlu input koordinat manual — bot akan cari otomatis.\n"
-        "• Log cuaca Windy tersimpan otomatis tiap 1 jam (jika mode Windy/Both).\n\n"
+        "• Bot ini menggunakan API BMKG v2 (Resolution 1 jam - 3 jam).\n"
+        "• Koordinat otomatis dicocokkan dengan kode wilayah BMKG terdekat.\n\n"
         "Pilih menu di bawah:"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_keyboard())
@@ -82,8 +82,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"├ Gempa: {LAST_EQ_TIME or 'Belum ada'}\n"
             f"└ RSS: {('Ada' if col_weather_alerts.find_one({'chat_id': 'SYSTEM'}) else 'Belum ada')}\n\n"
             f"⚙️ *API Status:*\n"
-            f"├ BMKG: ✅\n"
-            f"└ Windy: {'✅' if WINDY_API_KEY else '❌ (WINDY_API_KEY belum di-set)'}"
+            f"├ BMKG Gempa: ✅\n"
+            f"└ BMKG Cuaca: ✅ (v2 JSON)"
         )
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_keyboard())
         return
@@ -220,38 +220,78 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ""
         ]
 
-        # Windy
-        if mode in ("windy", "both"):
+        # BMKG Logic (Primary)
+        adm4 = doc.get("adm4")
+        if not adm4:
+            adm4 = get_adm4_from_csv(doc["name"])
+            if adm4:
+                # Save for future
+                col_locations.update_one({"_id": loc_id}, {"$set": {"adm4": adm4}})
+        
+        if adm4:
             try:
-                windy = await windy_point_forecast(doc["lat"], doc["lon"])
-                latest = parse_windy_latest(windy) or {}
-                ts = latest.get("ts")
+                data_json = await fetch_bmkg_point_forecast_json(adm4)
+                # Parse logic (simplified from jobs.py)
+                raw_data = data_json.get("data", [])
+                if raw_data:
+                    cuaca_lists = raw_data[0].get("cuaca", [])
+                    forecast_flat = []
+                    for sublist in cuaca_lists:
+                        for item in sublist:
+                            forecast_flat.append(item)
+                    
+                    # Sort
+                    def parse_dt(d_str):
+                        try: return datetime.strptime(d_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        except: return datetime.min.replace(tzinfo=timezone.utc)
+                    
+                    forecast_flat.sort(key=lambda x: parse_dt(x.get("utc_datetime", "")))
+                    
+                    # Find current (closest)
+                    now_utc = datetime.now(timezone.utc)
+                    best_current = None
+                    min_diff = 999999999
+                    for item in forecast_flat:
+                        dt_obj = parse_dt(item.get("utc_datetime"))
+                        diff = abs((dt_obj - now_utc).total_seconds())
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_current = item
+                    
+                    if best_current:
+                        lat_disp = f"{doc['lat']:.4f}"
+                        lon_disp = f"{doc['lon']:.4f}"
+                        
+                        t = best_current.get("t", "-")
+                        h = best_current.get("hu", "-")
+                        ws_kmh = float(best_current.get("ws", 0))
+                        ws_ms = ws_kmh / 3.6
+                        desc = best_current.get("weather_desc", "Berawan")
+                        
+                        text_parts += [
+                            "⛈ *BMKG Point Forecast*",
+                            f"📍 *Wilayah:* {doc['name']}",
+                            f"🆔 *Kode Wilayah:* {adm4}",
+                            f"🕐 *Waktu:* {best_current.get('local_datetime', '-')}",
+                            "",
+                            f"🌡 *Suhu:* {t}°C",
+                            f"💧 *Kelembapan:* {h}%",
+                            f"☁️ *Cuaca:* {desc}",
+                            f"🌬 *Angin:* {ws_ms:.1f} m/s",
+                            "",
+                            "ℹ️ *Sumber:* BMKG API v2",
+                            ""
+                        ]
+                    else:
+                        text_parts.append("⚠️ Data BMKG kosong untuk wilayah ini.")
+                else:
+                    text_parts.append("⚠️ Format Data BMKG tidak dikenali.")
 
-                text_parts += [
-                    "🌬 *Windy Forecast*",
-                    f"🕐 *Waktu:* {format_ts_ms(ts) if ts else '-'}",
-                    f"🌬 *Angin:* {latest.get('wind_speed_ms', '-') if latest.get('wind_speed_ms') is not None else '-'} m/s",
-                    f"🧭 *Arah:* {round(latest['wind_dir_deg'], 1)}°" if latest.get("wind_dir_deg") is not None else "🧭 *Arah:* -",
-                    f"💨 *Gust:* {latest.get('gust_ms', '-') if latest.get('gust_ms') is not None else '-'} m/s",
-                    f"🌡 *Suhu:* {latest.get('temp_c', '-') if latest.get('temp_c') is not None else '-'} °C",
-                    f"💧 *RH:* {latest.get('rh_pct', '-') if latest.get('rh_pct') is not None else '-'} %",
-                    f"🌧 *Hujan (akum 3 jam):* {latest.get('precip_3h_mm', '-') if latest.get('precip_3h_mm') is not None else '-'} mm",
-                    f"☁️ *Awan (avg):* {latest.get('cloud_avg_pct', '-') if latest.get('cloud_avg_pct') is not None else '-'} %",
-                    f"━━━━━━━━━━━━━━━━━━",
-                    "ℹ️ *Sumber:* Windy API",
-                    ""
-                ]
-            except Exception as e:
-                text_parts += [f"❌ Windy gagal: `{str(e)[:180]}`", ""]
-
-        # BMKG RSS (tidak point forecast, hanya alert/nowcast)
-        if mode in ("bmkg", "both"):
-            text_parts += [
-                "⛈ *BMKG Nowcast*",
-                "Gunakan notifikasi otomatis (RSS).",
-                "Jika ada peringatan yang cocok dengan lokasi Anda, bot akan mengirim alert.",
-                ""
-            ]
+            except Exception as bmkg_err:
+                text_parts.append(f"⚠️ Gagal mengambil data BMKG: {bmkg_err}")
+                
+        else:
+            text_parts.append("⚠️ Kode Wilayah BMKG tidak ditemukan. Coba nama lokasi yang lebih spesifik (misal: nama desa/kecamatan).")
 
         text = "\n".join(text_parts).strip()
 
@@ -269,9 +309,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚙️ *PENGATURAN*\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             f"*Mode Cuaca Aktif:* `{mode.upper()}`\n\n"
-            "🌐 BMKG  : alert nowcast RSS\n"
-            "🌬 Windy : forecast detail + logger\n"
-            "🔄 Both  : gabungan keduanya\n\n"
+            "Saat ini semua layanan menggunakan data **BMKG**.\n"
+            "Pilihan mode di bawah hanya mempengaruhi jenis notifikasi (RSS vs Point).\n\n"
             "Pilih mode:"
         )
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=settings_keyboard())
