@@ -291,10 +291,23 @@ async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
                 forecast_3h = []
                 for h in ["6", "12", "18", "24"]:
                     if h in weathers:
+                        # Estimate Precip for this hour
+                        wc = weathers.get(h, "0")
+                        p_mm = 0.0
+                        wt = get_bmkg_weather_text(wc).lower()
+                        if "lebat" in wt or "petir" in wt: p_mm = 10.0
+                        elif "sedang" in wt: p_mm = 5.0
+                        elif "ringan" in wt or "hujan" in wt: p_mm = 1.0
+
+                        ws_ms = float(winds.get(h, "0")) * 0.514444 # Knots to m/s
+
                         forecast_3h.append({
-                            "time": f"+{h}h", # Simplified for frontend
+                            "time": f"+{h}h", 
                             "temp": int(float(temps.get(h, 0))),
-                            "desc": get_bmkg_weather_text(weathers.get(h, "0"))
+                            "desc": get_bmkg_weather_text(wc),
+                            "humidity": int(float(hus.get(h, 0))),
+                            "wind_speed": float(f"{ws_ms:.1f}"),
+                            "precip": p_mm
                         })
 
                 # 4. Construct Payload

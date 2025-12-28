@@ -42,6 +42,9 @@ class ForecastItem(BaseModel):
     time: str
     temp: int
     desc: str
+    humidity: int
+    wind_speed: float
+    precip: float
 
 class WeatherLogData(BaseModel):
     temp: float
