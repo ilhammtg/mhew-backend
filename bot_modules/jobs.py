@@ -425,7 +425,7 @@ def ensure_jobs_for_chat(app: Application, chat_id: int):
 
     jq.run_repeating(check_gempa, interval=60, first=5, name=name_prefix + "eq", data={"chat_id": chat_id})
     jq.run_repeating(check_weather_rss, interval=300, first=10, name=name_prefix + "rss", data={"chat_id": chat_id})
-    jq.run_repeating(weather_logger, interval=3600, first=30, name=name_prefix + "wlog", data={"chat_id": chat_id})
+    jq.run_repeating(weather_logger, interval=3600, first=2, name=name_prefix + "wlog", data={"chat_id": chat_id})
 
 def ensure_system_jobs(app: Application):
     jq = app.job_queue
@@ -441,4 +441,4 @@ def ensure_system_jobs(app: Application):
             return
 
     jq.run_repeating(check_weather_rss_system, interval=300, first=5, name=name_prefix + "rss")
-    jq.run_repeating(weather_logger_system, interval=3600, first=10, name=name_prefix + "wlog")
+    jq.run_repeating(weather_logger_system, interval=3600, first=2, name=name_prefix + "wlog")

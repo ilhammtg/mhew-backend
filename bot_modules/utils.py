@@ -182,10 +182,43 @@ def get_adm4_from_csv(query_name: str) -> str:
     
     if not os.path.exists(csv_path):
         print(f"⚠️ CSV not found: {csv_path}")
+        # FALLBACK MANUAL untuk kota-kota utama jika CSV tidak ada/gagal
+        CITY_FALLBACKS = {
+            "banda aceh": "11.71.01.2005", # Peuniti
+            "lhokseumawe": "11.73.02.2004", # Gampong Jawa
+            "meulaboh": "11.05.01.2002",    # Kp. Belakang
+            "sigli": "11.07.03.2001",       # Blok Sawah
+            "takengon": "11.04.01.2001",    # Takengon Timur
+            "sabang": "11.72.02.2002",      # Kota Atas
+            "langsa": "11.74.02.2004",      # Gampong Jawa
+        }
+        target_simple = normalize_name(query_name).replace("kota ", "").strip()
+        for k, v in CITY_FALLBACKS.items():
+            if k in target_simple:
+                print(f"✅ Fallback Used for {query_name}: {v}")
+                return v
         return None
 
     target = normalize_name(query_name)
     best_code = None
+    
+    # Pre-check fallback SEBELUM CSV (untuk speed & akurasi kota besar)
+    CITY_FALLBACKS = {
+        "banda aceh": "11.71.01.2005",
+        "lhokseumawe": "11.73.02.2004",
+        "meulaboh": "11.05.01.2002",
+        "sigli": "11.07.03.2001",
+        "takengon": "11.04.01.2001",
+        "sabang": "11.72.02.2002",
+        "langsa": "11.74.02.2004"
+    }
+    
+    # Cek exact match atau contains pada fallback keys
+    target_simple = target.replace("kota ", "")
+    for k, v in CITY_FALLBACKS.items():
+        if k == target_simple or k in target_simple:
+             # Logic: if user says "Banda Aceh", return Peuniti code
+            return v
     
     try:
         with open(csv_path, "r", encoding="utf-8") as f:
