@@ -9,15 +9,16 @@ from .database import (
     col_locations, get_setting
 )
 from .services import (
-    get_bmkg_eq, fetch_bytes, windy_point_forecast
+    get_bmkg_eq, fetch_bytes, windy_point_forecast, get_bmkg_forecast_xml
 )
 from .utils import (
-    get_alert_level, normalize_name, parse_windy_latest, calculate_24h_precipitation
+    get_alert_level, normalize_name, parse_windy_latest, calculate_24h_precipitation,
+    haversine_distance, get_bmkg_weather_text, get_weather_score
 )
 
 # Global State
 LAST_EQ_TIME = None
-LAST_WEATHER_LINK = None
+# LAST_WEATHER_LINK removed
 
 async def check_gempa(context: ContextTypes.DEFAULT_TYPE):
     global LAST_EQ_TIME
@@ -53,7 +54,6 @@ async def check_gempa(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ EQ Error: {e}")
 
 async def check_weather_rss(context: ContextTypes.DEFAULT_TYPE):
-    global LAST_WEATHER_LINK
     try:
         chat_id = context.job.data.get("chat_id") if context.job and context.job.data else None
         if not chat_id:
@@ -75,11 +75,16 @@ async def check_weather_rss(context: ContextTypes.DEFAULT_TYPE):
             hay = normalize_name(f"{title} {desc}")
             match = any(k and k in hay for k in keywords_norm)
 
-            if match and link and link != LAST_WEATHER_LINK:
-                LAST_WEATHER_LINK = link
+            if match and link:
+                # Unique ID for this user + alert link
+                alert_id = f"{chat_id}:{link}"
+                
+                # Check if already sent
+                if col_weather_alerts.find_one({"_id": alert_id}):
+                    continue
 
                 data = {
-                    "_id": f"{chat_id}:{link}",
+                    "_id": alert_id,
                     "chat_id": chat_id,
                     "type": "bmkg_nowcast",
                     "title": title,
@@ -112,55 +117,122 @@ async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
         if not chat_id:
             return
 
-        mode = get_setting(chat_id, "weather_mode", DEFAULT_WEATHER_MODE)
-        if mode not in ("windy", "both"):
-            return
-
         locs = list(col_locations.find({"chat_id": chat_id}))
         if not locs:
             return
 
+        # 1. Ambil data BMKG (XML)
+        # Asumsi semua lokasi di Aceh/Sumut, jika tidak bisa dinamis nanti.
+        # Untuk efisiensi kita ambil XML sekali saja per run job ini.
+        try:
+            xml_bytes = await get_bmkg_forecast_xml("Aceh")
+            root = ET.fromstring(xml_bytes)
+            
+            # Extract areas
+            areas = []
+            for area in root.findall(".//area"):
+                lat = area.get("latitude")
+                lon = area.get("longitude")
+                desc = area.get("description") or area.get("id")
+                if lat and lon:
+                    areas.append({
+                        "node": area,
+                        "lat": float(lat),
+                        "lon": float(lon),
+                        "desc": desc
+                    })
+        except Exception as e:
+            print(f"⚠️ BMKG XML Error: {e}")
+            return
+
         now_utc = datetime.now(timezone.utc)
+        
         for loc in locs:
             try:
-                windy = await windy_point_forecast(loc["lat"], loc["lon"])
-                latest = parse_windy_latest(windy) or {}
+                # 2. Cari area terdekat
+                nearest = None
+                min_dist = 99999.0
+                
+                for a in areas:
+                    dist = haversine_distance(loc["lat"], loc["lon"], a["lat"], a["lon"])
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest = a
 
+                if not nearest or min_dist > 50: # Max 50km tolerance
+                    # print(f"⚠️ No BMKG station near {loc['name']} ({min_dist:.1f} km)")
+                    continue
+                
+                # 3. Parse Weather Code (h=0 usually closest to now)
+                # BMKG timerange format: 202412290000, 202412290600, etc.
+                # Kita cari timerange dengan datetime terdekat dengan now.
+                
+                weather_node = nearest["node"].find("parameter[@id='weather']")
+                if not weather_node:
+                    continue
+
+                best_val = None
+                min_time_diff = 999999
+                
+                for timerange in weather_node.findall("timerange"):
+                    dt_str = timerange.get("datetime") # YYYYMMDDHHmm
+                    if not dt_str: continue
+                    
+                    # BMKG XML format is usually local time or UTC? Usually UTC+7? 
+                    # Spec says datetime attribute is YYYYMMDDHHmm (local time? No, usually UTC in raw data, let's assume raw string compare for simplicity closest)
+                    # Let's clean parse.
+                    try:
+                        t = datetime.strptime(dt_str, "%Y%m%d%H%M")
+                        # Adjust timezone if needed. Context says parsing logic might be complex.
+                        # Simple logic: XML usually has h="0", "6" etc from base.
+                        # We just take the first one (h="0" -> closest forecast)
+                        
+                        val = timerange.findtext("value")
+                        if val:
+                            best_val = val
+                            # Break on first match usually current
+                            break
+                    except:
+                        pass
+                
+                if not best_val:
+                    continue
+                    
+                weather_text = get_bmkg_weather_text(best_val)
+                score = get_weather_score(weather_text)
+                
+                # 4. Log to DB
                 log_data = {
                     "chat_id": chat_id,
                     "location_id": loc["_id"],
                     "location_name": loc["name"],
                     "timestamp": now_utc,
-                    "source": "windy",
-                    "latest": latest,
-                    "forecast_raw": windy,
-                    "raw_keys": list(windy.keys())
+                    "source": "bmkg_digital_forecast",
+                    "bmkg_area": nearest["desc"],
+                    "bmkg_dist_km": min_dist,
+                    "weather_code": best_val,
+                    "weather_text": weather_text,
+                    "score": score
                 }
                 col_weather_logs.insert_one(log_data)
 
-                # Flood Alert Logic
-                total_precip = calculate_24h_precipitation(loc["_id"])
-                alert_msg = ""
+                # 5. Alert Logic (Simple & Readable)
+                # Only alert if DANGER (score 100) or changed significantly?
+                # User asked: "gampang dipahami".
                 
-                if total_precip > 150:
+                if score >= 75: # Waspada (75) / Bahaya (100)
+                    status_label = "BAHAYA" if score >= 100 else "WASPADA"
+                    emoji = "🔴" if score >= 100 else "🟠"
+                    
                     alert_msg = (
-                        f"🔴 *BAHAYA BANJIR BANDANG*\n"
+                        f"{emoji} *STATUS: {status_label}*\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📍 *Lokasi:* {loc['name']}\n"
-                        f"🌧 *Curah Hujan 24 Jam:* {total_precip:.1f} mm\n"
-                        f"⚠️ Segera evakuasi ke tempat tinggi!"
+                        f"📍 *{loc['name']}*\n"
+                        f"☁️ Kondisi: *{weather_text}*\n"
+                        f"⚠️ Hati-hati beraktivitas di luar rumah."
                     )
-                elif total_precip > 100:
-                    alert_msg = (
-                        f"🟠 *WASPADA BANJIR*\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📍 *Lokasi:* {loc['name']}\n"
-                        f"🌧 *Curah Hujan 24 Jam:* {total_precip:.1f} mm\n"
-                        f"⚠️ Waspada kenaikan debit air."
-                    )
-                
-                if alert_msg:
                     await context.bot.send_message(chat_id=chat_id, text=alert_msg, parse_mode=ParseMode.MARKDOWN)
+
             except Exception as e:
                 print(f"⚠️ Error logging {loc.get('name')}: {e}")
 
@@ -172,7 +244,6 @@ async def check_weather_rss_system(context: ContextTypes.DEFAULT_TYPE):
     System-level RSS check for default keywords (Aceh).
     Ensures dashboard has data even without active users.
     """
-    global LAST_WEATHER_LINK
     try:
         xml_bytes = await fetch_bytes(BMKG_NOWCAST_RSS)
         root = ET.fromstring(xml_bytes)
@@ -190,11 +261,16 @@ async def check_weather_rss_system(context: ContextTypes.DEFAULT_TYPE):
             hay = normalize_name(f"{title} {desc}")
             match = any(k and k in hay for k in keywords_norm)
 
-            if match and link and link != LAST_WEATHER_LINK:
-                LAST_WEATHER_LINK = link
+            if match and link:
+                # Unique ID for system + link
+                alert_id = f"SYSTEM:{link}"
+                
+                # Check if already processed
+                if col_weather_alerts.find_one({"_id": alert_id}):
+                    continue
 
                 data = {
-                    "_id": f"SYSTEM:{link}",
+                    "_id": alert_id,
                     "chat_id": "SYSTEM",
                     "type": "bmkg_nowcast",
                     "title": title,

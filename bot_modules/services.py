@@ -72,3 +72,26 @@ async def windy_point_forecast(lat: float, lon: float, model: str = "gfs", param
 async def get_bmkg_eq():
     data = await fetch_json(BMKG_EQ_URL)
     return data["Infogempa"]["gempa"]
+
+async def get_bmkg_forecast_xml(province: str = "Aceh") -> bytes:
+    """
+    Mengambil XML Digital Forecast berdasarkan provinsi (Default: Aceh).
+    Format URL: https://data.bmkg.go.id/DataMKG/MEWS/DigitalForecast/DigitalForecast-{Province}.xml
+    """
+    # Nama file provinsi umum: Aceh, SumateraUtara, SumateraBarat, Riau, Jambi,
+    # SumateraSelatan, Bengkulu, Lampung, BangkaBelitung, KepulauanRiau,
+    # DKIGakarta, JawaBarat, JawaTengah, DIJogyakarta, JawaTimur, Banten, Bali,
+    # NusaTenggaraBarat, NusaTenggaraTimur, KalimantanBarat, KalimantanTengah,
+    # KalimantanSelatan, KalimantanTimur, KalimantanUtara, SulawesiUtara,
+    # SulawesiTengah, SulawesiSelatan, SulawesiTenggara, Gorontalo, SulawesiBarat,
+    # Maluku, MalukuUtara, PapuaBarat, Papua.
+    
+    # Normalisasi nama provinsi sederhana (disesuaikan kebutuhan)
+    prov_map = {
+        "aceh": "Aceh",
+        "sumut": "SumateraUtara",
+        "jakarta": "DKIJakarta"
+    }
+    prov_key = prov_map.get(province.lower(), province)
+    url = f"https://data.bmkg.go.id/DataMKG/MEWS/DigitalForecast/DigitalForecast-{prov_key}.xml"
+    return await fetch_bytes(url)

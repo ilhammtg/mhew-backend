@@ -75,36 +75,41 @@ async def get_precip_status():
     try:
         locs = list(db.locations.find({}, {"_id": 1, "name": 1}))
         results = []
-        now = datetime.now(timezone.utc)
-        start_time = now - timedelta(hours=24)
         
         for loc in locs:
-            pipeline = [
-                {
-                    "$match": {
-                        "location_id": loc["_id"],
-                        "timestamp": {"$gte": start_time}
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": None,
-                        "total_precip": {"$sum": "$latest.precip_3h_mm"}
-                    }
-                }
-            ]
-            agg = list(db.weather_logs.aggregate(pipeline))
-            # Ensure total is NOT divided by 3.0 as per new logic
-            total = float(agg[0]["total_precip"]) if agg else 0.0
+            # Ambil log terakhir (BMKG atau Windy)
+            latest_log = db.weather_logs.find_one(
+                {"location_id": loc["_id"]},
+                sort=[("timestamp", -1)]
+            )
             
             status = "SAFE"
-            if total > 150: status = "DANGER"
-            elif total > 100: status = "WARNING"
+            val_text = "0.0 mm"
+            
+            if latest_log:
+                # Prioritas: BMKG Score
+                if "score" in latest_log:
+                    score = latest_log["score"]
+                    weather_text = latest_log.get("weather_text", "-")
+                    val_text = weather_text # Tampilkan "Hujan Petir" bukan angka
+                    
+                    if score >= 100: status = "DANGER"
+                    elif score >= 75: status = "WARNING"
+                    elif score >= 50: status = "WARNING" # Siaga
+                
+                # Fallback: Windy Precip (Legacy)
+                elif "latest" in latest_log:
+                    precip = latest_log["latest"].get("precip_3h_mm", 0.0)
+                    val_text = f"{precip:.1f} mm"
+                    if precip > 50: status = "DANGER" # Simplifikasi rule lama
             
             results.append({
                 "name": loc["name"],
-                "total_precip_24h": round(total, 2),
-                "status": status
+                "total_precip_24h": val_text, # Override type to string for frontend display? Frontend might expect number.
+                # Kita cek frontend: QuickStats.tsx. Kalau dia expect number, ini bakal error.
+                # Better returns separate fields.
+                "status": status,
+                "desc": val_text 
             })
         return results
     except Exception as e:

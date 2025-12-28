@@ -17,7 +17,7 @@ from .keyboards import (
     main_menu_keyboard, location_menu_keyboard, 
     settings_keyboard, back_keyboard
 )
-from .jobs import ensure_jobs_for_chat, LAST_EQ_TIME, LAST_WEATHER_LINK
+from .jobs import ensure_jobs_for_chat, LAST_EQ_TIME
 
 # Conversation states
 WAITING_LOCATION = 1
@@ -79,7 +79,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⛈ *Alert Cuaca (chat ini):* {alert_count}\n\n"
             f"🕐 *Update Terakhir:*\n"
             f"├ Gempa: {LAST_EQ_TIME or 'Belum ada'}\n"
-            f"└ RSS: {('Ada' if LAST_WEATHER_LINK else 'Belum ada')}\n\n"
+            f"└ RSS: {('Ada' if col_weather_alerts.find_one({'chat_id': 'SYSTEM'}) else 'Belum ada')}\n\n"
             f"⚙️ *API Status:*\n"
             f"├ BMKG: ✅\n"
             f"└ Windy: {'✅' if WINDY_API_KEY else '❌ (WINDY_API_KEY belum di-set)'}"

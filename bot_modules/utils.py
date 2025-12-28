@@ -117,3 +117,46 @@ def calculate_24h_precipitation(location_id: str) -> float:
         total_raw = float(result[0].get("total_precip", 0.0))
         return total_raw / 3.0
     return 0.0
+
+def get_bmkg_weather_text(code: str) -> str:
+    # Kode Cuaca BMKG: https://data.bmkg.go.id/prakiraan-cuaca/
+    codes = {
+        "0": "Cerah",
+        "1": "Cerah Berawan",
+        "2": "Cerah Berawan",
+        "3": "Berawan", 
+        "4": "Berawan Tebal", 
+        "5": "Udara Kabur",
+        "10": "Asap",
+        "45": "Kabut",
+        "60": "Hujan Ringan",
+        "61": "Hujan Sedang",
+        "63": "Hujan Lebat",
+        "80": "Hujan Lokal",
+        "95": "Hujan Petir",
+        "97": "Hujan Petir"
+    }
+    return codes.get(str(code), "Berawan")
+
+def get_weather_score(weather_text: str) -> int:
+    """
+    Mengembalikan skor bahaya berdasarkan teks cuaca (0-100).
+    """
+    text = weather_text.lower()
+    if "petir" in text or "lebat" in text:
+        return 100 # BAHAYA
+    if "sedang" in text:
+        return 75 # WASPADA
+    if "ringan" in text or "lokal" in text:
+        return 50 # SIAGA
+    return 0 # AMAN
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    R = 6371  # Radius bumi (km)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) * math.sin(dlat / 2) + \
+        math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
+        math.sin(dlon / 2) * math.sin(dlon / 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
