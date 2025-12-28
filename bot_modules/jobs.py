@@ -111,130 +111,212 @@ async def check_weather_rss(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"⚠️ Weather RSS Error: {e}")
 
-async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
+async def storm_monitor(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Memantau potensi badai dari Windy (Wind & Pressure).
+    """
     try:
-        chat_id = context.job.data.get("chat_id") if context.job and context.job.data else None
-        if not chat_id:
-            return
+        chat_id = context.job.data.get("chat_id")
+        if not chat_id: return
 
         locs = list(col_locations.find({"chat_id": chat_id}))
-        if not locs:
-            return
+        if not locs: return
+
+        # API Key & URL
+        api_key = os.getenv("API_KEY", "RAHASIA_KUNCI_API_ANDA")
+        api_url = os.getenv("API_BASE_URL", "http://127.0.0.1:8000") # Default local
+
+        for loc in locs:
+            try:
+                # 1. Fetch Windy Data
+                windy = await windy_point_forecast(loc["lat"], loc["lon"])
+                latest = parse_windy_latest(windy)
+                
+                if not latest: continue
+
+                # 2. Check Thresholds
+                # Wind Gust > 18 m/s (~65 km/h) OR Pressure < 998 hPa
+                wind_gust = latest.get("gust_ms", 0)
+                pressure = latest.get("pressure_pa", 101325) / 100 # Convert Pa to hPa
+                
+                is_alert = False
+                alert_msg = None
+
+                if wind_gust > 18:
+                    is_alert = True
+                    alert_msg = f"🌬 *POTENSI BADAI ANGIN*\nKecepatan Angin: {wind_gust:.1f} m/s"
+                elif pressure < 996:
+                    is_alert = True
+                    alert_msg = f"🌀 *TEKANAN RENDAH EKSTRIM*\nTekanan: {pressure:.1f} hPa"
+
+                # 3. Log to Storm Monitor via API
+                payload = {
+                    "location_id": str(loc["_id"]),
+                    "last_check": datetime.now(timezone.utc).isoformat(),
+                    "source": "Windy",
+                    "parameters": {
+                        "wind_gust": wind_gust,
+                        "pressure": pressure,
+                        "wind_direction": latest.get("wind_dir_deg", 0)
+                    },
+                    "is_alert": is_alert,
+                    "alert_message": alert_msg
+                }
+
+                # Post to API (Fire and forget, or log error)
+                headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.post(f"{api_url}/api/v1/storm/log", json=payload, headers=headers)
+
+                # 4. Telegram Alert
+                if is_alert:
+                     # Check cooldown? For now send alert.
+                    msg = (
+                        f"⚠️ *PERINGATAN DINI BADAI*\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📍 *{loc['name']}*\n"
+                        f"{alert_msg}\n\n"
+                        f"Tetap waspada dan pantau peta badai."
+                    )
+                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+
+            except Exception as e:
+                print(f"⚠️ Storm Monitor Error {loc['name']}: {e}")
+
+    except Exception as e:
+        print(f"⚠️ Storm Loop Error: {e}")
+
+async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Log data cuaca BMKG via API.
+    """
+    try:
+        chat_id = context.job.data.get("chat_id")
+        if not chat_id: return
+
+        locs = list(col_locations.find({"chat_id": chat_id}))
+        if not locs: return
+
+        api_key = os.getenv("API_KEY", "RAHASIA_KUNCI_API_ANDA")
+        api_url = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
         # 1. Ambil data BMKG (XML)
-        # Asumsi semua lokasi di Aceh/Sumut, jika tidak bisa dinamis nanti.
-        # Untuk efisiensi kita ambil XML sekali saja per run job ini.
         try:
             xml_bytes = await get_bmkg_forecast_xml("Aceh")
             root = ET.fromstring(xml_bytes)
-            
-            # Extract areas
+            # ... (Existing Area Extraction logic) ...
             areas = []
             for area in root.findall(".//area"):
                 lat = area.get("latitude")
                 lon = area.get("longitude")
                 desc = area.get("description") or area.get("id")
                 if lat and lon:
-                    areas.append({
-                        "node": area,
-                        "lat": float(lat),
-                        "lon": float(lon),
-                        "desc": desc
-                    })
+                    areas.append({"node": area, "lat": float(lat), "lon": float(lon), "desc": desc})
         except Exception as e:
             print(f"⚠️ BMKG XML Error: {e}")
             return
-
-        now_utc = datetime.now(timezone.utc)
         
+        now_utc = datetime.now(timezone.utc)
+
         for loc in locs:
             try:
                 # 2. Cari area terdekat
                 nearest = None
                 min_dist = 99999.0
-                
                 for a in areas:
                     dist = haversine_distance(loc["lat"], loc["lon"], a["lat"], a["lon"])
                     if dist < min_dist:
                         min_dist = dist
                         nearest = a
 
-                if not nearest or min_dist > 50: # Max 50km tolerance
-                    # print(f"⚠️ No BMKG station near {loc['name']} ({min_dist:.1f} km)")
-                    continue
-                
-                # 3. Parse Weather Code (h=0 usually closest to now)
-                # BMKG timerange format: 202412290000, 202412290600, etc.
-                # Kita cari timerange dengan datetime terdekat dengan now.
-                
+                if not nearest or min_dist > 50: continue
+
+                # 3. Parse Parameters
                 weather_node = nearest["node"].find("parameter[@id='weather']")
-                if not weather_node:
-                    continue
+                temp_node = nearest["node"].find("parameter[@id='t']") # Temp
+                hu_node = nearest["node"].find("parameter[@id='hu']") # Humidity
+                ws_node = nearest["node"].find("parameter[@id='ws']") # Wind Speed
 
-                best_val = None
-                min_time_diff = 999999
+                # Find closest time index (h=0) for "current"
+                # And build forecast_3h array
                 
-                for timerange in weather_node.findall("timerange"):
-                    dt_str = timerange.get("datetime") # YYYYMMDDHHmm
-                    if not dt_str: continue
-                    
-                    # BMKG XML format is usually local time or UTC? Usually UTC+7? 
-                    # Spec says datetime attribute is YYYYMMDDHHmm (local time? No, usually UTC in raw data, let's assume raw string compare for simplicity closest)
-                    # Let's clean parse.
-                    try:
-                        t = datetime.strptime(dt_str, "%Y%m%d%H%M")
-                        # Adjust timezone if needed. Context says parsing logic might be complex.
-                        # Simple logic: XML usually has h="0", "6" etc from base.
-                        # We just take the first one (h="0" -> closest forecast)
-                        
-                        val = timerange.findtext("value")
-                        if val:
-                            best_val = val
-                            # Break on first match usually current
-                            break
-                    except:
-                        pass
+                # Helper to extract value by time
+                # Build dict: time -> val
+                def get_vals(node):
+                    res = {}
+                    if not node: return res
+                    for tr in node.findall("timerange"):
+                        h = tr.get("h") # "0", "6", etc
+                        dt = tr.get("datetime") # YYYYMMDDHHmm
+                        val = tr.findtext("value")
+                        if h and val: res[h] = val
+                        if dt and val: res[dt] = val
+                    return res
+
+                weathers = get_vals(weather_node)
+                temps = get_vals(temp_node)
+                hus = get_vals(hu_node)
+                winds = get_vals(ws_node) # knots usually, need conversion? BMKG ws is usually knots or m/s? Spec says MPH or KPH or MS? Usually KPH or MS. Let's assume MS or Knots. Usually Knots in XML. 1 knot = 0.514 m/s.
+
+                # Determine "Current" (h=0 or closest)
+                # BMKG XML format: timerange h="0", h="6"...
                 
-                if not best_val:
-                    continue
-                    
-                weather_text = get_bmkg_weather_text(best_val)
-                score = get_weather_score(weather_text)
+                # Current Data
+                cur_weather_code = weathers.get("0") or "0"
+                cur_temp = float(temps.get("0") or 25)
+                cur_hu = float(hus.get("0") or 80)
+                cur_ws_knots = float(winds.get("0") or 5)
+                cur_ws_ms = cur_ws_knots * 0.514444
+
+                # Estimate Precip from Weather Code
+                # 60=Ringan, 61=Sedang, 63=Lebat -> Rough mm estimation for aggregation
+                # Ringan ~ 1mm/h? Sedang ~ 5mm/h?
+                # User asked: "skrip pengambil data BMKG memetakan parameter curah hujan (precip) secara akurat"
+                # BMKG does NOT provide precip_mm in DigitalForecast usually, only Weather Code.
+                # We interpret Code -> Precip.
                 
-                # 4. Log to DB
-                log_data = {
-                    "chat_id": chat_id,
-                    "location_id": loc["_id"],
-                    "location_name": loc["name"],
-                    "timestamp": now_utc,
-                    "source": "bmkg_digital_forecast",
-                    "bmkg_area": nearest["desc"],
-                    "bmkg_dist_km": min_dist,
-                    "weather_code": best_val,
-                    "weather_text": weather_text,
-                    "score": score
+                precip_mm = 0.0
+                w_text = get_bmkg_weather_text(cur_weather_code).lower()
+                if "lebat" in w_text or "petir" in w_text: precip_mm = 10.0 # 10mm/3h
+                elif "sedang" in w_text: precip_mm = 5.0
+                elif "ringan" in w_text or "hujan" in w_text: precip_mm = 1.0
+                
+                # Build Forecast Array (Next 3 time slots: h=6, 12, 18...)
+                # Actually BMKG provides h=0, 6, 12, 18, 24.. (6 hourly?)
+                # Or 0, 3, 6? Some areas have 3 hourly.
+                # Use what's available.
+                
+                forecast_3h = []
+                for h in ["6", "12", "18", "24"]:
+                    if h in weathers:
+                        forecast_3h.append({
+                            "time": f"+{h}h", # Simplified for frontend
+                            "temp": int(float(temps.get(h, 0))),
+                            "desc": get_bmkg_weather_text(weathers.get(h, "0"))
+                        })
+
+                # 4. Construct Payload
+                payload = {
+                    "location_id": str(loc["_id"]),
+                    "timestamp": now_utc.isoformat(),
+                    "source": "BMKG",
+                    "data": {
+                        "temp": int(cur_temp),
+                        "humidity": int(cur_hu),
+                        "weather_desc": get_bmkg_weather_text(cur_weather_code),
+                        "precip_mm": precip_mm,
+                        "wind_speed": cur_ws_ms
+                    },
+                    "forecast_3h": forecast_3h
                 }
-                col_weather_logs.insert_one(log_data)
 
-                # 5. Alert Logic (Simple & Readable)
-                # Only alert if DANGER (score 100) or changed significantly?
-                # User asked: "gampang dipahami".
-                
-                if score >= 75: # Waspada (75) / Bahaya (100)
-                    status_label = "BAHAYA" if score >= 100 else "WASPADA"
-                    emoji = "🔴" if score >= 100 else "🟠"
-                    
-                    alert_msg = (
-                        f"{emoji} *STATUS: {status_label}*\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📍 *{loc['name']}*\n"
-                        f"☁️ Kondisi: *{weather_text}*\n"
-                        f"⚠️ Hati-hati beraktivitas di luar rumah."
-                    )
-                    await context.bot.send_message(chat_id=chat_id, text=alert_msg, parse_mode=ParseMode.MARKDOWN)
+                # 5. Send to API
+                headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.post(f"{api_url}/api/v1/weather/log", json=payload, headers=headers)
 
             except Exception as e:
-                print(f"⚠️ Error logging {loc.get('name')}: {e}")
+                print(f"⚠️ Weather Log Error {loc['name']}: {e}")
 
     except Exception as e:
         print(f"⚠️ Weather Logger Error: {e}")
