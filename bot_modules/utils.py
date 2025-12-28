@@ -1,6 +1,7 @@
 import re
 import math
 from datetime import datetime, timezone, timedelta
+import os
 from .database import col_weather_logs
 
 def normalize_name(s: str) -> str:
@@ -160,3 +161,53 @@ def haversine_distance(lat1, lon1, lat2, lon2):
         math.sin(dlon / 2) * math.sin(dlon / 2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+def get_adm4_from_csv(query_name: str) -> str:
+    """
+    Mencari kode ADM4 (10 digit) dari file backend/base.csv.
+    Format CSV: Kode,Nama
+    Contoh: 11.71.01.2005,Peuniti
+    
+    Strategi:
+    1. Cari exact match pada nama kelurahan/gampong (kolom 2).
+    2. Jika ada multiple, ambil yang pertama (atau bisa ditambah logika parent).
+    3. Return kode (kolom 1).
+    """
+    if not query_name: return None
+    
+    # Path relative to this file (bot_modules/utils.py -> backend/base.csv)
+    # utils.py is in backend/bot_modules, so up one level is backend.
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    csv_path = os.path.join(base_dir, "base.csv")
+    
+    if not os.path.exists(csv_path):
+        print(f"⚠️ CSV not found: {csv_path}")
+        return None
+
+    target = normalize_name(query_name)
+    best_code = None
+    
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) < 2: continue
+                
+                code = parts[0].strip()
+                name = normalize_name(parts[1])
+                
+                # Kita cari level 4 (Kelurahan/Desa) -> 10 digit (xx.xx.xx.xxxx)
+                # Filter hanya kode panjang > 7 (biar gak match provinsi/kabupaten)
+                if len(code) > 8: 
+                    # Exact match name
+                    if name == target:
+                        return code
+                    # Partial match (jika user input "gampong peuniti" tapi csv "peuniti")
+                    if target in name or name in target:
+                        best_code = code # Simpan kandidat, tapi lanjut cari exact
+                        
+    except Exception as e:
+        print(f"⚠️ CSV Read Error: {e}")
+        return None
+        
+    return best_code

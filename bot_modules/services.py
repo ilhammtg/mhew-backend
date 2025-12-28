@@ -95,3 +95,22 @@ async def get_bmkg_forecast_xml(province: str = "Aceh") -> bytes:
     prov_key = prov_map.get(province.lower(), province)
     url = f"https://data.bmkg.go.id/DataMKG/MEWS/DigitalForecast/DigitalForecast-{prov_key}.xml"
     return await fetch_bytes(url)
+
+async def fetch_bmkg_point_forecast_json(adm4_code: str):
+    """
+    Mengambil data cuaca point forecast (v2) dari BMKG API.
+    URL: https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4={code}
+    """
+    url = "https://api.bmkg.go.id/publik/prakiraan-cuaca"
+    params = {"adm4": adm4_code}
+    
+    # Header minimal supaya tidak diblok
+    headers = {
+        "User-Agent": "MHEWS-Bot/3.0",
+        "Accept": "application/json"
+    }
+    
+    async with httpx.AsyncClient(timeout=20, headers=headers, follow_redirects=True) as c:
+        r = await c.get(url, params=params)
+        r.raise_for_status()
+        return r.json()

@@ -11,11 +11,12 @@ from .database import (
     col_locations, get_setting
 )
 from .services import (
-    get_bmkg_eq, fetch_bytes, windy_point_forecast, get_bmkg_forecast_xml
+    get_bmkg_eq, fetch_bytes, windy_point_forecast, get_bmkg_forecast_xml,
+    fetch_bmkg_point_forecast_json
 )
 from .utils import (
     get_alert_level, normalize_name, parse_windy_latest, calculate_24h_precipitation,
-    haversine_distance, get_bmkg_weather_text, get_weather_score
+    haversine_distance, get_bmkg_weather_text, get_weather_score, get_adm4_from_csv
 )
 
 # Global State
@@ -202,130 +203,122 @@ async def weather_logger(context: ContextTypes.DEFAULT_TYPE):
         api_key = os.getenv("API_KEY", "RAHASIA_KUNCI_API_ANDA")
         api_url = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
-        # 1. Ambil data BMKG (XML)
-        try:
-            xml_bytes = await get_bmkg_forecast_xml("Aceh")
-            root = ET.fromstring(xml_bytes)
-            # ... (Existing Area Extraction logic) ...
-            areas = []
-            for area in root.findall(".//area"):
-                lat = area.get("latitude")
-                lon = area.get("longitude")
-                desc = area.get("description") or area.get("id")
-                if lat and lon:
-                    areas.append({"node": area, "lat": float(lat), "lon": float(lon), "desc": desc})
-        except Exception as e:
-            print(f"⚠️ BMKG XML Error: {e}")
-            return
-        
-        now_utc = datetime.now(timezone.utc)
-
-        for loc in locs:
             try:
-                # 2. Cari area terdekat
-                nearest = None
-                min_dist = 99999.0
-                for a in areas:
-                    dist = haversine_distance(loc["lat"], loc["lon"], a["lat"], a["lon"])
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest = a
+                # 2. Resolve ADM4 Code (Dynamic from CSV / DB)
+                adm4_code = loc.get("adm4")
+                if not adm4_code:
+                    # Try lookup from CSV
+                    found_code = get_adm4_from_csv(loc["name"])
+                    if found_code:
+                        print(f"✅ Auto-resolved ADM4 for {loc['name']}: {found_code}")
+                        # Persist to DB
+                        col_locations.update_one({"_id": loc["_id"]}, {"$set": {"adm4": found_code}})
+                        adm4_code = found_code
+                    else:
+                        print(f"⚠️ ADM4 Code not found for {loc['name']}, skipping BMKG log.")
+                        continue # Skip if no code found
 
-                if not nearest or min_dist > 50: continue
-
-                # 3. Parse Parameters
-                weather_node = nearest["node"].find("parameter[@id='weather']")
-                temp_node = nearest["node"].find("parameter[@id='t']") # Temp
-                hu_node = nearest["node"].find("parameter[@id='hu']") # Humidity
-                ws_node = nearest["node"].find("parameter[@id='ws']") # Wind Speed
-
-                # Find closest time index (h=0) for "current"
-                # And build forecast_3h array
+                # 3. Fetch Data JSON
+                data_json = await fetch_bmkg_point_forecast_json(adm4_code)
+                if not data_json or "data" not in data_json: 
+                    continue
                 
-                # Helper to extract value by time
-                # Build dict: time -> val
-                def get_vals(node):
-                    res = {}
-                    if not node: return res
-                    for tr in node.findall("timerange"):
-                        h = tr.get("h") # "0", "6", etc
-                        dt = tr.get("datetime") # YYYYMMDDHHmm
-                        val = tr.findtext("value")
-                        if h and val: res[h] = val
-                        if dt and val: res[dt] = val
-                    return res
-
-                weathers = get_vals(weather_node)
-                temps = get_vals(temp_node)
-                hus = get_vals(hu_node)
-                winds = get_vals(ws_node) # knots usually, need conversion? BMKG ws is usually knots or m/s? Spec says MPH or KPH or MS? Usually KPH or MS. Let's assume MS or Knots. Usually Knots in XML. 1 knot = 0.514 m/s.
-
-                # Determine "Current" (h=0 or closest)
-                # BMKG XML format: timerange h="0", h="6"...
+                # Structure: data[0] -> cuaca[][]
+                # Usually data[0] is the location
+                # cuaca is list of list? Or list of objects?
+                # Sample: "cuaca": [[{"datetime":...}, ...]]
+                # Flatten the list of lists
                 
-                # Current Data
-                cur_weather_code = weathers.get("0") or "0"
-                cur_temp = float(temps.get("0") or 25)
-                cur_hu = float(hus.get("0") or 80)
-                cur_ws_knots = float(winds.get("0") or 5)
-                cur_ws_ms = cur_ws_knots * 0.514444
-
-                # Estimate Precip from Weather Code
-                # 60=Ringan, 61=Sedang, 63=Lebat -> Rough mm estimation for aggregation
-                # Ringan ~ 1mm/h? Sedang ~ 5mm/h?
-                # User asked: "skrip pengambil data BMKG memetakan parameter curah hujan (precip) secara akurat"
-                # BMKG does NOT provide precip_mm in DigitalForecast usually, only Weather Code.
-                # We interpret Code -> Precip.
+                forecast_flat = []
+                # Check data structure deeply
+                raw_data = data_json.get("data", [])
+                if not raw_data: continue
                 
-                precip_mm = 0.0
-                w_text = get_bmkg_weather_text(cur_weather_code).lower()
-                if "lebat" in w_text or "petir" in w_text: precip_mm = 10.0 # 10mm/3h
-                elif "sedang" in w_text: precip_mm = 5.0
-                elif "ringan" in w_text or "hujan" in w_text: precip_mm = 1.0
+                cuaca_lists = raw_data[0].get("cuaca", [])
+                for sublist in cuaca_lists:
+                    for item in sublist:
+                        forecast_flat.append(item)
                 
-                # Build Forecast Array (Next 3 time slots: h=6, 12, 18...)
-                # Actually BMKG provides h=0, 6, 12, 18, 24.. (6 hourly?)
-                # Or 0, 3, 6? Some areas have 3 hourly.
-                # Use what's available.
+                # Sort by datetime just in case
+                # Format: "2025-10-12 08:00:00" (utc_datetime)
+                def parse_dt(d_str):
+                    try:
+                        return datetime.strptime(d_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    except:
+                        return datetime.min.replace(tzinfo=timezone.utc)
+
+                forecast_flat.sort(key=lambda x: parse_dt(x.get("utc_datetime", "")))
                 
-                forecast_3h = []
-                for h in ["6", "12", "18", "24"]:
-                    if h in weathers:
-                        # Estimate Precip for this hour
-                        wc = weathers.get(h, "0")
-                        p_mm = 0.0
-                        wt = get_bmkg_weather_text(wc).lower()
-                        if "lebat" in wt or "petir" in wt: p_mm = 10.0
-                        elif "sedang" in wt: p_mm = 5.0
-                        elif "ringan" in wt or "hujan" in wt: p_mm = 1.0
+                # 4. Find Current & Forecast
+                # Current = item closest to now_utc
+                # Simple logic: first item in future OR very last item if all past?
+                # Better: item with smallest abs(delta) to now
+                
+                best_current = None
+                min_diff = 999999999
+                
+                # Forecast 24h = items > now
+                forecast_24h_items = []
+                
+                for item in forecast_flat:
+                    dt_obj = parse_dt(item.get("utc_datetime"))
+                    diff = abs((dt_obj - now_utc).total_seconds())
+                    
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_current = item
+                        
+                    if dt_obj > now_utc and len(forecast_24h_items) < 8: # Next 24h (3h intervals -> 8 items)
+                        forecast_24h_items.append(item)
+                
+                if not best_current: continue
 
-                        ws_ms = float(winds.get(h, "0")) * 0.514444 # Knots to m/s
+                # 5. Extract Current Values
+                # Keys: t (temp), hu (humid), ws (wind km/h?), weather_desc, weather (code)
+                cur_temp = float(best_current.get("t", 0))
+                cur_hu = float(best_current.get("hu", 0))
+                cur_desc = best_current.get("weather_desc", "Berawan")
+                cur_ws_kmh = float(best_current.get("ws", 0))
+                cur_ws_ms = cur_ws_kmh / 3.6 # Km/h to m/s
+                
+                # Precip Logic (Estimate from Code/Desc)
+                # BMKG JSON sometimes has 'tp' (Rain Potential?) or just weather code
+                # Sample had "tp": 0.1 (mm?)
+                precip_mm = float(best_current.get("tp", 0.0)) # Try reading tp direct
+                
+                # 6. Build Forecast Array
+                final_forecast = []
+                for f in forecast_24h_items:
+                    f_dt = parse_dt(f.get("utc_datetime"))
+                    time_diff = int((f_dt - now_utc).total_seconds() / 3600)
+                    
+                    ws_ms_item = float(f.get("ws", 0)) / 3.6
+                    
+                    final_forecast.append({
+                        "time": f"+{time_diff}h",
+                        "temp": int(f.get("t", 0)),
+                        "desc": f.get("weather_desc", ""),
+                        "humidity": int(f.get("hu", 0)),
+                        "wind_speed": float(f"{ws_ms_item:.1f}"),
+                        "precip": float(f.get("tp", 0.0))
+                    })
 
-                        forecast_3h.append({
-                            "time": f"+{h}h", 
-                            "temp": int(float(temps.get(h, 0))),
-                            "desc": get_bmkg_weather_text(wc),
-                            "humidity": int(float(hus.get(h, 0))),
-                            "wind_speed": float(f"{ws_ms:.1f}"),
-                            "precip": p_mm
-                        })
-
-                # 4. Construct Payload
+                # 7. Construct Payload
                 payload = {
                     "location_id": str(loc["_id"]),
                     "timestamp": now_utc.isoformat(),
-                    "source": "BMKG",
+                    "source": "BMKG_API",
                     "data": {
                         "temp": int(cur_temp),
                         "humidity": int(cur_hu),
-                        "weather_desc": get_bmkg_weather_text(cur_weather_code),
+                        "weather_desc": cur_desc,
                         "precip_mm": precip_mm,
                         "wind_speed": cur_ws_ms
                     },
-                    "forecast_3h": forecast_3h
+                    "forecast_3h": final_forecast
                 }
 
-                # 5. Send to API
+                # 8. Send to API
                 headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(f"{api_url}/api/v1/weather/log", json=payload, headers=headers)
